@@ -4,6 +4,8 @@ import numpy as np
 import cv2
 import math
 
+import globals
+
 def grayscale(img):
     """Applies the Grayscale transform
     This will return an image with only one color channel
@@ -105,19 +107,21 @@ def weighted_img(img, initial_img, α=0.8, β=1., γ=0.):
     """
     return cv2.addWeighted(initial_img, α, img, β, γ)
 
-def polar_2_cartesian(polar_line, boundaries = None):
+def polar_line_boundaries(polar_line, boundaries = None):
     """
     Input `polar_line` should contain: (rho, cos_theta, sin_theta)
 
     Returns line points in cartesian space from the polar space parameters for that line:
         (x1, y1, x2, y2)
 
-    `boundaries` if provided define the image boundaries over which the line should be presented.
+    `boundaries` if provided define the image boundaries over which the segment should be presented.
     """
-    x1, y1, x2, y2 = 0, 0, 0, 0
-    rho, cos_theta, sin_theta = polar_line
 
-    # Provide more numerical robustness by dividing over greater projection for the line normal
+    x1, y1, x2, y2 = 0, 0, 0, 0
+    rho, cos_theta, sin_theta, d = polar_line
+
+    # Provide more numerical robustness by dividing over greater
+    # projection for the line normal
     if cos_theta >= abs(sin_theta):
         y1 = 0
 
@@ -153,10 +157,27 @@ def cartesian_2_polar(line):
     Returns:
         (rho, cos_theta, sin_theta, d)
     """
-    x1, y1, x2, y2 = line
 
+    x1, y1, x2, y2 = line
     dy = y2 - y1
     dx = x2 - x1
+
+    return segment_2_polar(x1, y1, dx, dy)
+
+def segment_2_polar(x1, y1, dx, dy):
+    """
+    Inputs represent line segment with one point and projections to (x, y) axis.
+    Only the ratio of projections is actualy used in calculating polar line
+    coordinates.
+
+    Transform the line to polar space using the typical definition:
+        -pi/2 < theta < pi/2
+
+    This allows for negative rho but also ensures: cos(theta) >= 0
+
+    Returns:
+        (rho, cos_theta, sin_theta, d)
+    """
 
     # Calculate the length of the line segment
     d = np.sqrt(dy*dy + dx*dx)
@@ -174,103 +195,92 @@ def cartesian_2_polar(line):
 
     return (rho, cos_theta, sin_theta, d)
 
-def find_average_line(lines, guide_line, phi):
+def calculate_average_sums(lines, middle_x):
     """
-    Finds the "average" line from the given line set that are also within the
-    angle phi from the guide_line. The purpose of this is to filter out lines that
-    deviate too much from the guide. Other reason is to confine the definition of
-    "average" only for the lines that are within pi/2 degrees of each other, so it
-    also follows that phi <= pi/4.
+    Inputs
+    - line segments used to detect left and right lane lines
+    - middle x point that separates left and right lanes
 
-    Returns:
-        (rho_avg, cos_theta_avg, sin_theta_avg)
+    Outputs
+    - sum of projection lengths
+    - weighted sum of projection middle points. Weights represent lengths
+      of projections
     """
 
-    # Calculate guide_line cos_theta, sin_theta
-    (rho_g, cos_g, sin_g, d_g) = cartesian_2_polar(guide_line)
-
-    # Max allowed deviation
-    cos_phi = np.cos(phi)
-
-    d_sum = 0
-    median_x = 0
-    median_y = 0
-    cos_theta_g_sum = 0
-    sin_theta_g_sum = 0
+     # { "x_sum": 0, "y_sum":0, "dx_sum":0, "dy_sum": 0 }
+    left_lane = np.array([0.0, 0.0, 0.0, 0.0])
+    right_lane = np.array([0.0, 0.0, 0.0, 0.0])
 
     for line in lines:
-        (rho, cos_theta, sin_theta, d) = cartesian_2_polar(line[0])
+        x1, y1, x2, y2 = line[0]
 
-        # Calculate coordinates referenced to guide_line by using scalar vector product
-        # (cos_theta + I * sin_theta) * (cos_g - I * sin_g)
-        cos_theta_g = cos_theta * cos_g + sin_theta * sin_g
-        sin_theta_g = -cos_theta * sin_g + sin_theta * cos_g
+        # To keep it simple we disregard vertical lines
+        if x2 == x1:
+            continue
 
-        # Use abs since we are not interested in the sign of the projection
-        if abs(cos_theta_g) >= cos_phi:
-            x1, y1, x2, y2 = line[0]
-            d_sum += d
+        elif x2 < x1:
+            x1, x2 = x2, x1
 
-            # Calculate the "center of mass" for the line segment to establish average position
-            median_x += d * (x2 + x1)/2
-            median_y += d * (y2 + y1)/2
+        # Also disregard horizontal lines
+        if y2 == y1:
+            continue
 
-            # Calculate sum of projections (for the line normal)
-            cos_theta_g_sum += d * cos_theta_g
-            sin_theta_g_sum += d * sin_theta_g
+        dx_sum = x2 - x1
+        dy_sum = y2 - y1
 
-    # Finaly, calculate averages
-    median_x = median_x / d_sum
-    median_y = median_y / d_sum
+        x_sum = (x1 + x2) * dx_sum / 2
+        y_sum = (y2 + y1) * abs(dy_sum) / 2
 
-    r = np.sqrt(sin_theta_g_sum * sin_theta_g_sum + cos_theta_g_sum * cos_theta_g_sum)
-    cos_theta_avg = cos_theta_g_sum / r
-    sin_theta_avg = sin_theta_g_sum / r
+        if (x1 < middle_x and x2 < middle_x) and (dy_sum < 0):
+            left_lane += [x_sum, y_sum, dx_sum, dy_sum]
 
-    # Map average line to original coordinate system (1, 0)
-    # (cos_theta_avg + I * sin_theta_avg) * (cos_g + I * sin_g)
-    cos_theta = cos_theta_avg * cos_g - sin_theta_avg * sin_g
-    sin_theta = cos_theta_avg * sin_g + sin_theta_avg * cos_g
+        elif (x1 > middle_x and x2 > middle_x) and (dy_sum > 0):
+            right_lane += [x_sum, y_sum, dx_sum, dy_sum]
 
-    # Finaly we get the average in polar coordinates, since we have pojection of the
-    # line normal and one (middle) point
-    rho_avg = cos_theta * median_x + sin_theta * median_y
+    return np.array([left_lane, right_lane])
 
-    return (rho_avg, cos_theta, sin_theta)
+def find_average_line(lines, middle_x, boundaries = None):
+    """
+    Inputs
+    - lines obtained from Hough transform
+    - middle x point that separates left and right lanes
+    - image boundaries for plotting detected lane lines
 
-def lane_segments(image, params, lines_only = False):
-     # Gray scalling
-    gray = grayscale(image)
+    Outputs
+    - detected left and right lanes
 
-    # Gaussian smoothing
-    blur_gray = gaussian_blur(gray, params["kernel_size"])
+    """
+    # { "x_sum": 0, "y_sum":0, "dx_sum":0, "dy_sum": 0 }
+    current_lane = calculate_average_sums(lines, middle_x)
 
-    # Canny edge detection
-    edges = canny(blur_gray, params["low_threshold"], params["high_threshold"])
+    # Average with previous values (Average with priors)
+    current_lane = (current_lane + globals.glob_previous_lanes) / 2
 
-    # Region of interest for lane detection as a four sided polygon
-    left_boundary = params["left_boundary"]
-    right_boundary = params["right_boundary"]
-    lane_boundaries = np.array([left_boundary + right_boundary], dtype=np.int32)
+    # Extend lines for by first converting to polar coordinates
+    x_sum, y_sum, dx_sum, dy_sum = current_lane[0]
 
-    masked_edges = region_of_interest(edges, lane_boundaries)
+    # Remember, for left lane the dy projections are negative!
+    mid_x, mid_y = x_sum / dx_sum, - y_sum / dy_sum
+    polar_l = segment_2_polar(mid_x, mid_y, dx_sum, dy_sum)
 
-    # Hough transform
-    lines = hough_lines(
-        masked_edges,
-        params["rho_resolution"],
-        params["theta_resolution"],
-        params["min_votes"],
-        params["min_line_length"],
-        params["max_line_gap"])
+    x_sum, y_sum, dx_sum, dy_sum = current_lane[1]
+    mid_x, mid_y = x_sum / dx_sum, y_sum / dy_sum
+    polar_r = segment_2_polar(mid_x, mid_y, dx_sum, dy_sum)
 
-    line_image = np.zeros_like(image)
-    draw_lines(line_image, lines, color = [255,0,0])
-    line_image = region_of_interest(line_image, lane_boundaries)
+    # Remember sums for current lane, for later averaging
+    globals.glob_previous_lanes = current_lane
 
-    return line_image if lines_only else cv2.addWeighted(line_image, 1, image, 0.6, 0)
+    lane_lines = [(polar_line_boundaries(polar_l, boundaries), polar_line_boundaries(polar_r, boundaries))]
+
+    return lane_lines
 
 def lane_detection(image, params, lines_only = False):
+    """
+    Inputs
+    - image to process lane lines
+    - parameters for the lane detection algorithm
+    - plot lines only or the combined image
+    """
 
     # Gray scalling
     gray = grayscale(image)
@@ -283,43 +293,28 @@ def lane_detection(image, params, lines_only = False):
 
     # Region of interest for lane detection as a four sided polygon
     imshape = image.shape
-    middle_x = imshape[1]/2
 
     left_boundary = params["left_boundary"]
     right_boundary = params["right_boundary"]
-    boundary_height = params["boundary_height"]
-
-    left_lane_boundaries = np.array([left_boundary + [(middle_x, boundary_height), (middle_x, imshape[0])]], dtype=np.int32)
-    right_lane_boundaries = np.array([[(middle_x, imshape[0]), (middle_x, boundary_height)] + right_boundary], dtype=np.int32)
     lane_boundaries = np.array([left_boundary + right_boundary], dtype=np.int32)
-
-    masked_edges_left = region_of_interest(edges, left_lane_boundaries)
-    masked_edges_right = region_of_interest(edges, right_lane_boundaries)
+    region_lines = region_of_interest(edges, lane_boundaries)
 
     # Hough transform
-    hough_lines_left = hough_lines(
-        masked_edges_left,
+    h_lines = hough_lines(
+        region_lines,
         params["rho_resolution"],
         params["theta_resolution"],
         params["min_votes"],
         params["min_line_length"],
         params["max_line_gap"])
 
-    hough_lines_right = hough_lines(
-        masked_edges_right,
-        params["rho_resolution"],
-        params["theta_resolution"],
-        params["min_votes"],
-        params["min_line_length"],
-        params["max_line_gap"])
-
-    # Guiding line, choosen as left and right region boundaries
-    avg_line_left = find_average_line(hough_lines_left, left_boundary[0] + left_boundary[1], params["theta_deviation"])
-    avg_line_right = find_average_line(hough_lines_right, right_boundary[0] + right_boundary[1], params["theta_deviation"])
+    # Calculate middle point to separate lanes
+    middle_x = (left_boundary[1][0] + right_boundary[0][0]) / 2
+    avg_lines = find_average_line(h_lines, middle_x, imshape)
 
     # Create left and right lane lines
-    left_lane = np.int32(polar_2_cartesian(avg_line_left, imshape))
-    right_lane = np.int32(polar_2_cartesian(avg_line_right, imshape))
+    left_lane = np.int32(avg_lines[0][0])
+    right_lane = np.int32(avg_lines[0][1])
 
     lane_image = np.zeros_like(image)
     draw_lines(lane_image, np.array([[left_lane]]), color = [255,0,0], thickness = 5)
@@ -328,21 +323,9 @@ def lane_detection(image, params, lines_only = False):
     lane_image = region_of_interest(lane_image, lane_boundaries)
 
     if lines_only:
-        draw_lines(lane_image, hough_lines_left, color = [0,0,255])
-        draw_lines(lane_image, hough_lines_right, color = [0,0,255])
+        draw_lines(lane_image, h_lines, color = [0,0,255])
         processed_image = lane_image
     else:
         processed_image = cv2.addWeighted(lane_image, 1, image, 0.6, 0)
 
     return processed_image
-
-
-def plot_polar_lines(image, polar_lines):
-
-    cartesian_lines = []
-
-    for polar_line in polar_lines:
-        rho, cos_theta, sin_theta = polar_line[0], np.cos(polar_line[1]), np.sin(polar_line[1])
-        cartesian_lines.append(polar_2_cartesian([rho, cos_theta, sin_theta], image.shape))
-
-    draw_lines(image, np.array([cartesian_lines], dtype=np.int32))
